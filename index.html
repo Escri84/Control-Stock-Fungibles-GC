@@ -13,11 +13,14 @@
         import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, updateDoc, deleteDoc, query } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
         import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
 
-        const firebaseConfig = {
-        const app = "AIzaSyCpVrpyADYJMLI3g3RvBKv3q-do0enbDhs",
-        const db = "control-stock-fungibles-gc.firebasestorage.app",
-        const auth = "control-stock-fungibles-gc.firebaseapp.com",
-        const appId = "1:813508366790:web:4c3edf42a3b9d84712e2c7",
+       const firebaseConfig = {
+  apiKey: "AIzaSyCpVrpyADYJMLI3g3RvBKv3q-do0enbDhs",
+  authDomain: "control-stock-fungibles-gc.firebaseapp.com",
+  projectId: "control-stock-fungibles-gc",
+  storageBucket: "control-stock-fungibles-gc.firebasestorage.app",
+  messagingSenderId: "813508366790",
+  appId: "1:813508366790:web:4c3edf42a3b9d84712e2c7",
+  measurementId: "G-CCFJVY03X8"
 
         window.inventory = [];
         window.authorizedUsers = [];
