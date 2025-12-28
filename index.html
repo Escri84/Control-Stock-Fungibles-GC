@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Control Stock Guardia Civil</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, updateDoc, deleteDoc, query } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
+
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'stock-gc-v36';
+
+        window.inventory = [];
+        window.authorizedUsers = [];
+        window.appSettings = { 
+            logo: "", 
+            primaryColor: "#054d3b",
+            appName: "Control Stock",
+            accessPass: "arm2299" 
+        };
+        window.sessionLog = []; 
+        window.currentView = 'inv';
+        window.searchQuery = "";
+        window.activeWithdrawId = null;
+
+        const publicPath = `artifacts/${appId}/public/data`;
+
+        async function initAuth() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (e) { console.error("Error Auth:", e); }
+        }
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) setupRealtimeSync();
+        });
+
+        function setupRealtimeSync() {
+            if (!auth.currentUser) return;
+            
+            onSnapshot(collection(db, publicPath, "inventory"), (s) => {
+                window.inventory = s.docs.map(d => ({ id: d.id, ...d.data() }));
+                render();
+            });
+
+            onSnapshot(collection(db, publicPath, "authorized_users"), (s) => {
+                window.authorizedUsers = s.docs.map(d => ({ id: d.id, ...d.data() }));
+                render();
+            });
+
+            onSnapshot(doc(db, publicPath, "settings", "general"), (d) => {
+                if (d.exists()) { 
+                    window.appSettings = { ...window.appSettings, ...d.data() }; 
+                    updateTheme();
+                    render(); 
+                } else {
+                    setDoc(doc(db, publicPath, "settings", "general"), window.appSettings);
+                }
+            });
+        }
+
+        function updateTheme() {
+            document.documentElement.style.setProperty('--primary-color', window.appSettings.primaryColor);
+        }
+
+        // --- FUNCIONES DE NEGOCIO ---
+
+        window.addItem = async () => {
+            if (!auth.currentUser) return;
+            const t = document.getElementById('in-t').value.trim().toUpperCase();
+            const q = parseInt(document.getElementById('in-q').value);
+            const u = document.getElementById('in-u').value.trim().toUpperCase();
+            const c = document.getElementById('in-c').value.trim().toUpperCase(); 
+
+            if (!t || isNaN(q) || !u) return showToast("RELLENE TODOS LOS CAMPOS");
+            
+            // Buscar si el item ya existe (mismo nombre, ubicación y referencia)
+            const existingItem = window.inventory.find(item => 
+                item.title === t && 
+                item.unidad === u && 
+                item.extra === c
+            );
+
+            try {
+                if (existingItem) {
+                    // SUMAR AL EXISTENTE
+                    const itemRef = doc(db, publicPath, "inventory", existingItem.id);
+                    await updateDoc(itemRef, { 
+                        cantidad: existingItem.cantidad + q,
+                        timestamp: Date.now() 
+                    });
+                    showToast("STOCK ACTUALIZADO (SUMADO)");
+                } else {
+                    // CREAR NUEVO
+                    const id = Date.now().toString();
+                    const newItem = { id, title: t, cantidad: q, unidad: u, extra: c, timestamp: Date.now(), type: 'ALTA' };
+                    await setDoc(doc(db, publicPath, "inventory", id), newItem);
+                    showToast("ALTA REGISTRADA");
+                }
+                
+                window.sessionLog.unshift({ title: t, cantidad: q, unidad: u, extra: c, timestamp: Date.now(), type: 'ALTA' }); 
+                document.getElementById('in-t').value = "";
+                document.getElementById('in-q').value = "";
+                render();
+            } catch (e) { showToast("ERROR AL GUARDAR"); }
+        };
+
+        window.confirmWithdraw = async () => {
+            if (!auth.currentUser || !window.activeWithdrawId) return;
+            const qtyInput = document.getElementById('w-qty');
+            const qty = parseInt(qtyInput.value);
+            const item = window.inventory.find(i => i.id === window.activeWithdrawId);
+            
+            if (!item || isNaN(qty) || qty <= 0) return showToast("CANTIDAD NO VÁLIDA");
+            if (qty > item.cantidad) return showToast("STOCK INSUFICIENTE");
+
+            try {
+                const itemRef = doc(db, publicPath, "inventory", item.id);
+                if (qty === item.cantidad) {
+                    await deleteDoc(itemRef);
+                } else {
+                    await updateDoc(itemRef, { cantidad: item.cantidad - qty });
+                }
+                
+                window.sessionLog.unshift({
+                    ...item,
+                    id_log: Date.now(),
+                    cantidad: qty,
+                    timestamp: Date.now(),
+                    type: 'RETIRADA'
+                });
+
+                if (document.getElementById('w-pdf').checked) {
+                    window.generateReceiptPDF([{...item, cantidad: qty}], "VALE DE RETIRADA");
+                }
+                
+                showToast("STOCK ACTUALIZADO");
+                closeWithdraw();
+                render();
+            } catch (e) { showToast("ERROR EN LA OPERACIÓN"); }
+        };
+
+        window.removeRecent = (timestamp) => {
+            window.sessionLog = window.sessionLog.filter(i => i.timestamp !== timestamp);
+            render();
+            showToast("ELIMINADO DEL HISTORIAL");
+        };
+
+        window.clearRecents = () => {
+            window.sessionLog = [];
+            render();
+            showToast("HISTORIAL LIMPIO");
+        };
+
+        window.saveAppSettings = async (data) => {
+            try {
+                await setDoc(doc(db, publicPath, "settings", "general"), data, { merge: true });
+                showToast("AJUSTES ACTUALIZADOS");
+            } catch (e) { showToast("ERROR"); }
+        };
+
+        window.changePassword = async () => {
+            const newPass = document.getElementById('new-app-pass').value;
+            if (!newPass || newPass.length < 4) return showToast("MIN. 4 CARACTERES");
+            
+            try {
+                await window.saveAppSettings({ accessPass: newPass });
+                document.getElementById('new-app-pass').value = "";
+                showToast("CONTRASEÑA CAMBIADA");
+            } catch (e) { showToast("ERROR AL CAMBIAR"); }
+        };
+
+        window.addUser = async () => {
+            const tip = document.getElementById('new-user-tip').value.trim().toUpperCase();
+            const nom = document.getElementById('new-user-name').value.trim().toUpperCase();
+            if (!tip || !nom) return showToast("RELLENE DATOS");
+            try {
+                await setDoc(doc(db, publicPath, "authorized_users", tip), { tip, nombre: nom });
+                showToast("USUARIO AÑADIDO");
+                document.getElementById('new-user-tip').value = "";
+                document.getElementById('new-user-name').value = "";
+            } catch (e) { showToast("ERROR"); }
+        };
+
+        window.removeUser = async (id) => {
+            try {
+                await deleteDoc(doc(db, publicPath, "authorized_users", id));
+                showToast("USUARIO ELIMINADO");
+            } catch (e) { showToast("ERROR"); }
+        };
+
+        // --- EXPORTACIÓN ---
+
+        window.generateReceiptPDF = (items, type) => {
+            if (items.length === 0) return showToast("SIN DATOS");
+            showToast("GENERANDO PDF...");
+            
+            const container = document.createElement('div');
+            container.style.padding = "40px";
+            container.style.backgroundColor = "white";
+            container.style.color = "#333";
+            container.style.fontFamily = "Arial, sans-serif";
+            
+            const logoHtml = window.appSettings.logo 
+                ? `<img src="${window.appSettings.logo}" style="max-height: 80px; display: block; margin: 0 auto 20px auto;">` 
+                : `<div style="font-size: 40px; font-weight: bold; color: ${window.appSettings.primaryColor}; text-align: center; margin-bottom: 20px;">GC</div>`;
+            
+            container.innerHTML = `
+                <div style="text-align: center; border-bottom: 2px solid ${window.appSettings.primaryColor}; padding-bottom: 20px; margin-bottom: 30px;">
+                    ${logoHtml}
+                    <h1 style="margin:0; font-size: 18px; color: ${window.appSettings.primaryColor}; text-transform: uppercase;">Destacamento de Armamento y Equipamiento Policial de Castellón</h1>
+                    <p style="font-size: 14px; margin: 10px 0; font-weight: bold;">${type}</p>
+                    <p style="font-size: 10px; color: #666;">FECHA: ${new Date().toLocaleString()}</p>
+                </div>
+                <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+                    <thead>
+                        <tr style="background: #f2f2f2;">
+                            <th style="border: 1px solid #ddd; padding: 12px; text-align: left;">MATERIAL</th>
+                            <th style="border: 1px solid #ddd; padding: 12px; text-align: center;">CANT.</th>
+                            <th style="border: 1px solid #ddd; padding: 12px; text-align: left;">UBICACIÓN / UNIDAD</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${items.map(i => `
+                            <tr>
+                                <td style="border: 1px solid #ddd; padding: 12px;">${i.title}</td>
+                                <td style="border: 1px solid #ddd; padding: 12px; text-align: center; font-weight: bold;">${i.cantidad}</td>
+                                <td style="border: 1px solid #ddd; padding: 12px;">${i.unidad} ${i.extra ? '('+i.extra+')' : ''}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+                <div style="margin-top: 100px; display: flex; justify-content: space-between;">
+                    <div style="text-align: center; width: 45%;">
+                        <div style="border-top: 1px solid #000; padding-top: 10px; font-size: 10px; font-weight: bold;">FDO: RESPONSABLE DE CARGO</div>
+                    </div>
+                    <div style="text-align: center; width: 45%;">
+                        <div style="border-top: 1px solid #000; padding-top: 10px; font-size: 10px; font-weight: bold;">FDO: EL INTERESADO</div>
+                    </div>
+                </div>
+            `;
+            
+            const opt = {
+                margin: 0.5,
+                filename: `Recibo_Stock_${Date.now()}.pdf`,
+                image: { type: 'jpeg', quality: 0.98 },
+                html2canvas: { scale: 2, useCORS: true },
+                jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
+            };
+
+            html2pdf().set(opt).from(container).save().catch(err => {
+                showToast("ERROR PDF");
+            });
+        };
+
+        window.generateExcel = (items, fileName = "Exportacion") => {
+            if (items.length === 0) return showToast("SIN DATOS");
+            showToast("GENERANDO EXCEL...");
+            
+            const data = items.map(i => ({
+                "MATERIAL": i.title,
+                "CANTIDAD": i.cantidad,
+                "UBICACIÓN": i.unidad,
+                "REFERENCIA": i.extra || "-",
+                "ESTADO": i.type || 'EN STOCK',
+                "FECHA": new Date(i.timestamp).toLocaleString()
+            }));
+
+            const ws = XLSX.utils.json_to_sheet(data);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Hoja1");
+            
+            try {
+                XLSX.writeFile(wb, `${fileName}_${Date.now()}.xlsx`);
+            } catch (e) {
+                showToast("ERROR EXCEL");
+            }
+        };
+
+        window.onload = initAuth;
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+        :root { --primary-color: #054d3b; }
+        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; overflow-x: hidden; }
+        .text-primary { color: var(--primary-color); }
+        .bg-primary { background-color: var(--primary-color); }
+        .tab-active { color: var(--primary-color); border-bottom: 3px solid var(--primary-color); font-weight: 900; }
+        input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        .custom-scroll::-webkit-scrollbar { width: 4px; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+    </style>
+</head>
+<body class="pb-20">
+
+    <!-- LOGIN -->
+    <div id="login-screen" class="fixed inset-0 z-[200] bg-primary flex items-center justify-center p-6">
+        <div class="bg-white w-full max-w-sm rounded-[2.5rem] p-10 shadow-2xl text-center">
+            <div id="login-logo-container" class="mb-6 h-12 flex justify-center items-center font-black text-primary text-2xl">GC</div>
+            <h2 class="font-black text-slate-800 uppercase text-[10px] mb-8 tracking-[0.2em]">Sistema Control Stock</h2>
+            <div class="space-y-3">
+                <input type="text" id="user-input" class="w-full p-5 bg-slate-50 rounded-2xl font-bold text-center uppercase outline-none focus:ring-2 focus:ring-primary/20 transition-all" placeholder="TIP">
+                <input type="password" id="pass-input" class="w-full p-5 bg-slate-50 rounded-2xl font-bold text-center outline-none focus:ring-2 focus:ring-primary/20 transition-all" placeholder="CLAVE">
+            </div>
+            <button onclick="checkLogin()" class="w-full mt-8 py-5 bg-primary text-white font-black rounded-2xl uppercase text-[10px] tracking-widest hover:brightness-110 transition-all shadow-lg shadow-primary/20">Entrar</button>
+        </div>
+    </div>
+
+    <div id="app-container" class="hidden">
+        <header class="bg-white border-b border-slate-200 sticky top-0 z-50 px-6 py-6 shadow-sm">
+            <div class="max-w-4xl mx-auto flex justify-between items-center mb-6">
+                <div class="flex items-center gap-4">
+                    <div id="header-logo-container" class="w-10 h-10 rounded-xl bg-primary text-white flex items-center justify-center font-black text-xs overflow-hidden">GC</div>
+                    <div>
+                        <h1 class="font-black text-[11px] uppercase tracking-tight text-slate-800">Control Stock</h1>
+                        <p class="text-[8px] font-bold text-slate-400 uppercase">Castellón - Armamento</p>
+                    </div>
+                </div>
+                <button onclick="location.reload()" class="text-[8px] font-black text-slate-400 uppercase tracking-widest hover:text-red-500">Cerrar Sesión</button>
+            </div>
+            <nav class="max-w-4xl mx-auto flex gap-8 text-[10px] font-black uppercase tracking-widest">
+                <button onclick="changeView('inv')" id="t-inv" class="tab-active pb-2">Inventario</button>
+                <button onclick="changeView('ges')" id="t-ges" class="opacity-40 pb-2">Gestión</button>
+                <button onclick="changeView('config')" id="t-config" class="opacity-40 pb-2">Ajustes</button>
+            </nav>
+        </header>
+        <main class="max-w-4xl mx-auto p-4 sm:p-8" id="main-content"></main>
+    </div>
+
+    <!-- MODAL RETIRADA -->
+    <div id="withdraw-modal" class="fixed inset-0 z-[300] bg-slate-900/60 backdrop-blur-sm hidden items-center justify-center p-6">
+        <div class="bg-white w-full max-w-xs rounded-[2.5rem] p-8 shadow-2xl">
+            <h3 class="font-black text-slate-800 uppercase text-xs mb-1">Retirar Material</h3>
+            <p id="w-title" class="text-[10px] font-bold text-slate-400 uppercase mb-8"></p>
+            <input id="w-qty" type="number" class="w-full p-5 bg-slate-100 rounded-2xl font-black text-center text-2xl mb-6 outline-none" value="1">
+            <label class="flex items-center gap-3 mb-8 cursor-pointer group">
+                <input type="checkbox" id="w-pdf" class="w-5 h-5 accent-primary rounded-lg" checked>
+                <span class="text-[9px] font-black uppercase text-slate-500 group-hover:text-primary transition-colors">Generar Vale PDF</span>
+            </label>
+            <div class="space-y-2">
+                <button onclick="confirmWithdraw()" class="w-full py-5 bg-primary text-white font-black rounded-2xl text-[10px] uppercase shadow-lg shadow-primary/20">Confirmar</button>
+                <button onclick="closeWithdraw()" class="w-full py-5 bg-slate-100 text-slate-400 font-bold rounded-2xl text-[10px] uppercase">Cancelar</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-8 py-4 rounded-full text-[10px] font-black uppercase opacity-0 transition-all duration-300 z-[500] pointer-events-none shadow-xl"></div>
+
+    <script>
+        function checkLogin() {
+            const u = document.getElementById('user-input').value.toUpperCase();
+            const p = document.getElementById('pass-input').value;
+            const isAuthorized = u === "M60072W" || window.authorizedUsers.some(au => au.tip === u);
+            
+            if(isAuthorized && p === window.appSettings.accessPass) {
+                document.getElementById('login-screen').classList.add('hidden');
+                document.getElementById('app-container').classList.remove('hidden');
+                render();
+            } else showToast("ACCESO DENEGADO");
+        }
+
+        function render() {
+            const c = document.getElementById('main-content');
+            if(!c) return;
+
+            const logo = window.appSettings.logo ? `<img src="${window.appSettings.logo}" class="w-full h-full object-contain">` : `<span class="font-black">GC</span>`;
+            document.getElementById('header-logo-container').innerHTML = logo;
+            document.getElementById('login-logo-container').innerHTML = logo;
+
+            const tabs = ['inv', 'ges', 'config'];
+            tabs.forEach(t => {
+                const el = document.getElementById(`t-${t}`);
+                if(el) el.className = window.currentView === t ? 'tab-active pb-2 transition-all' : 'opacity-40 pb-2 hover:opacity-100 transition-all';
+            });
+
+            if(window.currentView === 'inv') renderInv(c);
+            else if(window.currentView === 'ges') renderGes(c);
+            else if(window.currentView === 'config') renderConfig(c);
+        }
+
+        function renderInv(c) {
+            c.innerHTML = `
+                <div class="space-y-6">
+                    <div class="flex flex-col sm:flex-row gap-3">
+                        <input id="search-input" oninput="window.searchQuery = this.value; renderInventoryItems();" value="${window.searchQuery}" placeholder="BUSCAR..." class="flex-1 p-5 bg-white rounded-2xl shadow-sm outline-none text-[11px] font-black uppercase border border-slate-100 focus:border-primary/30">
+                        <button onclick="window.generateExcel(window.inventory, 'Inventario_DAEP')" class="bg-emerald-600 text-white px-8 py-5 rounded-2xl text-[10px] font-black uppercase flex items-center justify-center gap-3 hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2.5" d="M12 5v14m-7-7l7 7 7-7"></path></svg>
+                            Hoja Cálculo
+                        </button>
+                    </div>
+                    <div id="inventory-list" class="grid gap-4"></div>
+                </div>`;
+            renderInventoryItems();
+        }
+
+        function renderInventoryItems() {
+            const listContainer = document.getElementById('inventory-list');
+            if(!listContainer) return;
+            const q = window.searchQuery.toUpperCase();
+            const list = window.inventory.filter(i => i.title.includes(q) || i.unidad.includes(q));
+            listContainer.innerHTML = list.map(i => `
+                <div class="bg-white p-6 rounded-[2rem] shadow-sm flex justify-between items-center border border-slate-50 hover:shadow-md transition-shadow">
+                    <div>
+                        <h3 class="font-black text-slate-800 text-[11px] uppercase">${i.title}</h3>
+                        <div class="flex flex-wrap items-center gap-2 mt-2">
+                            <span class="text-[8px] font-bold text-slate-400 uppercase bg-slate-100 px-2 py-1 rounded-md">${i.unidad}</span>
+                            ${i.extra ? `<span class="text-[8px] font-bold text-slate-400 uppercase bg-slate-50 border border-slate-100 px-2 py-1 rounded-md">REF: ${i.extra}</span>` : ''}
+                            <span class="text-[10px] text-primary font-black uppercase ml-1">Stock: ${i.cantidad}</span>
+                        </div>
+                    </div>
+                    <button onclick="openWithdraw('${i.id}')" class="bg-slate-900 text-white px-6 py-3.5 rounded-xl text-[9px] font-black uppercase hover:bg-primary transition-colors">Retirar</button>
+                </div>
+            `).join('') || '<div class="text-center py-20 opacity-20 font-black text-xs">NO SE ENCONTRÓ NADA</div>';
+        }
+
+        function renderGes(c) {
+            c.innerHTML = `
+                <div class="grid md:grid-cols-2 gap-8">
+                    <div class="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100 space-y-4 h-fit">
+                        <h2 class="font-black text-[10px] uppercase text-slate-400 mb-2">Entrada de Material</h2>
+                        <input id="in-t" class="w-full p-5 bg-slate-50 rounded-2xl font-black text-[10px] uppercase outline-none focus:ring-2 focus:ring-primary/10" placeholder="NOMBRE DEL ARTÍCULO">
+                        <input id="in-q" type="number" class="w-full p-5 bg-slate-50 rounded-2xl font-black text-[10px] outline-none" placeholder="CANTIDAD">
+                        <input id="in-u" class="w-full p-5 bg-slate-50 rounded-2xl font-black text-[10px] uppercase outline-none" placeholder="UBICACIÓN / UNIDAD">
+                        <input id="in-c" class="w-full p-5 bg-slate-50 rounded-2xl font-black text-[10px] uppercase outline-none" placeholder="REFERENCIA / LOTE (OPCIONAL)">
+                        <button onclick="addItem()" class="w-full py-5 bg-primary text-white font-black rounded-2xl text-[10px] uppercase shadow-lg shadow-primary/20">Registrar Entrada</button>
+                        <p class="text-[8px] font-bold text-slate-400 text-center uppercase tracking-tighter">Si el material ya existe en la misma ubicación, se sumará automáticamente.</p>
+                    </div>
+                    <div class="space-y-4">
+                        <div class="flex justify-between items-center px-2">
+                            <h2 class="font-black text-[10px] uppercase text-slate-400">Actividad Reciente</h2>
+                            <button onclick="clearRecents()" class="text-[8px] font-black text-red-500 uppercase hover:bg-red-50 px-3 py-1.5 rounded-lg transition-colors">Limpiar</button>
+                        </div>
+                        <div class="flex gap-2">
+                            <button onclick="window.generateReceiptPDF(window.sessionLog, 'MOVIMIENTOS DAEP')" class="flex-1 text-primary border border-primary/30 rounded-2xl py-3 text-[9px] font-black uppercase hover:bg-primary/5 transition-colors">Relación PDF</button>
+                            <button onclick="window.generateExcel(window.sessionLog, 'Movimientos_Sesion')" class="flex-1 text-emerald-600 border border-emerald-600/30 rounded-2xl py-3 text-[9px] font-black uppercase hover:bg-emerald-50 transition-colors">Exportar Excel</button>
+                        </div>
+                        <div class="space-y-2 overflow-y-auto max-h-[450px] pr-2 custom-scroll">
+                            ${window.sessionLog.map(i => `
+                                <div class="bg-white p-5 rounded-[1.5rem] border border-slate-50 flex justify-between items-center shadow-sm">
+                                    <div class="flex-1">
+                                        <div class="flex items-center gap-2 mb-1">
+                                            <span class="text-[7px] font-black px-1.5 py-0.5 rounded ${i.type === 'RETIRADA' ? 'bg-red-100 text-red-600' : 'bg-emerald-100 text-emerald-600'}">${i.type}</span>
+                                            <span class="text-[10px] font-black uppercase text-slate-800">${i.title}</span>
+                                        </div>
+                                        <p class="text-[8px] font-bold text-slate-400">${i.cantidad} UNID. en ${i.unidad} ${i.extra ? '| REF: '+i.extra : ''}</p>
+                                    </div>
+                                    <button onclick="removeRecent(${i.timestamp})" class="text-slate-200 hover:text-red-500 p-2 transition-colors">✕</button>
+                                </div>
+                            `).join('') || '<div class="py-20 border-2 border-dashed rounded-[2rem] text-center text-[9px] font-black text-slate-300 uppercase">Sin movimientos</div>'}
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        function renderConfig(c) {
+            c.innerHTML = `
+                <div class="space-y-8">
+                    <div class="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100">
+                        <h2 class="font-black text-[10px] uppercase text-slate-800 mb-8">Ajustes de Interfaz</h2>
+                        <div class="grid md:grid-cols-2 gap-8">
+                            <div>
+                                <label class="text-[9px] font-black text-slate-400 uppercase block mb-3">Color de Marca</label>
+                                <input type="color" value="${window.appSettings.primaryColor}" onchange="saveAppSettings({primaryColor: this.value})" class="w-full h-14 rounded-2xl cursor-pointer bg-white">
+                            </div>
+                            <div>
+                                <label class="text-[9px] font-black text-slate-400 uppercase block mb-3">Escudo del Centro</label>
+                                <input type="file" onchange="handleLogo(event)" class="text-[9px] block w-full text-slate-400 file:mr-4 file:py-3 file:px-6 file:rounded-full file:border-0 file:text-[9px] file:font-black file:bg-primary file:text-white cursor-pointer">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100">
+                        <h2 class="font-black text-[10px] uppercase text-slate-800 mb-8">Seguridad</h2>
+                        <div class="flex flex-col sm:flex-row gap-4">
+                            <div class="flex-1">
+                                <label class="text-[9px] font-black text-slate-400 uppercase block mb-3">Nueva Contraseña de Acceso</label>
+                                <input id="new-app-pass" type="text" class="w-full p-5 bg-slate-50 rounded-2xl font-black text-[10px] uppercase outline-none focus:ring-2 focus:ring-primary/10" placeholder="MÍNIMO 4 CARACTERES">
+                            </div>
+                            <div class="flex items-end">
+                                <button onclick="changePassword()" class="w-full sm:w-auto px-10 py-5 bg-slate-900 text-white font-black rounded-2xl text-[10px] uppercase hover:bg-primary transition-all shadow-lg">Actualizar</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100">
+                        <h2 class="font-black text-[10px] uppercase text-slate-800 mb-8">Usuarios Autorizados</h2>
+                        <div class="flex flex-col sm:flex-row gap-2 mb-8">
+                            <input id="new-user-tip" class="flex-1 p-5 bg-slate-50 rounded-2xl font-black text-[10px] uppercase outline-none" placeholder="TIP">
+                            <input id="new-user-name" class="flex-1 p-5 bg-slate-50 rounded-2xl font-black text-[10px] uppercase outline-none" placeholder="NOMBRE COMPLETO">
+                            <button onclick="addUser()" class="bg-primary text-white font-black px-8 py-5 rounded-2xl text-[10px] uppercase shadow-lg shadow-primary/20">Autorizar</button>
+                        </div>
+                        <div class="grid gap-2">
+                            ${window.authorizedUsers.map(u => `
+                                <div class="flex justify-between items-center p-5 bg-slate-50 rounded-2xl">
+                                    <div class="flex flex-col">
+                                        <span class="text-[10px] font-black uppercase text-slate-800">${u.tip}</span>
+                                        <span class="text-[8px] font-bold text-slate-400 uppercase">${u.nombre}</span>
+                                    </div>
+                                    <button onclick="removeUser('${u.id}')" class="bg-red-50 text-red-500 w-10 h-10 rounded-xl flex items-center justify-center font-bold hover:bg-red-500 hover:text-white transition-all">✕</button>
+                                </div>
+                            `).join('') || '<div class="text-center py-4 text-[9px] font-bold text-slate-300 italic uppercase tracking-widest">No hay usuarios adicionales</div>'}
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        window.openWithdraw = (id) => {
+            window.activeWithdrawId = id;
+            const item = window.inventory.find(i => i.id === id);
+            if (!item) return;
+            document.getElementById('withdraw-modal').classList.replace('hidden', 'flex');
+            document.getElementById('w-title').innerText = item.title;
+        };
+
+        window.closeWithdraw = () => {
+            window.activeWithdrawId = null;
+            document.getElementById('withdraw-modal').classList.replace('flex', 'hidden');
+        };
+
+        window.changeView = (v) => { window.currentView = v; render(); };
+        
+        window.showToast = (m) => {
+            const t = document.getElementById('toast');
+            t.innerText = m; t.style.opacity = '1';
+            setTimeout(() => t.style.opacity = '0', 3000);
+        };
+
+        window.handleLogo = (e) => {
+            const reader = new FileReader();
+            reader.onload = async (ev) => {
+                await saveAppSettings({ logo: ev.target.result });
+            };
+            if(e.target.files[0]) reader.readAsDataURL(e.target.files[0]);
+        };
+    </script>
+</body>
+</html>
