@@ -14,10 +14,10 @@
         import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
 
         const firebaseConfig = JSON.parse(__firebase_config);
-        const app = initializeApp(firebaseConfig);
-        const db = getFirestore(app);
-        const auth = getAuth(app);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'stock-gc-v36';
+        const app = "AIzaSyCpVrpyADYJMLI3g3RvBKv3q-do0enbDhs",
+        const db = "control-stock-fungibles-gc.firebasestorage.app",
+        const auth = "control-stock-fungibles-gc.firebaseapp.com",
+        const appId = "1:813508366790:web:4c3edf42a3b9d84712e2c7",
 
         window.inventory = [];
         window.authorizedUsers = [];
