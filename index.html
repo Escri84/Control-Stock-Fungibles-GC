@@ -1,208 +1,51 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Control Stock Guardia Civil - Supabase Sync</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Librería de Supabase -->
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    
-    <script type="module">
-        
-
-import { createClient } from '@supabase/supabase-js'
-const supabaseUrl = 'https://ulyziwpcwaetmxmzjrxq.supabase.co'
-const supabaseKey = sb_publishable_7aAhfIZz38PvEHH4n7iRrg_Fj9Uz85q
-const supabase = createClient(supabaseUrl, supabaseKey)
-
-         const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-
-        // Estado Global
-        window.inventory = [];
-        window.history = [];
-        window.appSettings = { logo: '' };
-        window.currentView = 'inventory';
-
-        // --- INICIALIZACIÓN Y SINCRONIZACIÓN ---
-        const initData = async () => {
-            await fetchAllData();
-            
-            // Suscripción en tiempo real a cambios
-            supabase
-                .channel('schema-db-changes')
-                .on('postgres_changes', { event: '*', schema: 'public' }, () => {
-                    fetchAllData();
-                })
-                .subscribe();
-        };
-
-        const fetchAllData = async () => {
-            // Cargar Inventario
-            const { data: inv } = await supabase.from('inventory').select('*').order('title');
-            if (inv) window.inventory = inv;
-
-            // Cargar Historial
-            const { data: hist } = await supabase.from('history').select('*').order('created_at', { ascending: false }).limit(20);
-            if (hist) window.history = hist;
-
-            // Cargar Ajustes
-            const { data: sett } = await supabase.from('settings').select('*').single();
-            if (sett) window.appSettings = sett;
-
-            render();
-        };
-
-        // --- ACCIONES DE BASE DE DATOS ---
-        window.saveItem = async (title, stock) => {
-            const { error } = await supabase
-                .from('inventory')
-                .insert([{ title: title.toUpperCase(), stock }]);
-            if (error) console.error(error);
-            window.showToast("Elemento añadido");
-        };
-
-        window.updateItemStock = async (id, newStock, reason) => {
-            // 1. Actualizar stock
-            await supabase.from('inventory').update({ stock: newStock }).eq('id', id);
-            
-            // 2. Registrar movimiento
-            await supabase.from('history').insert([{ 
-                item_id: id, 
-                change_log: reason, 
-                new_stock: newStock 
-            }]);
-            
-            window.showToast("Stock actualizado");
-        };
-
-        window.saveLogo = async (base64) => {
-            const { error } = await supabase
-                .from('settings')
-                .upsert({ id: 1, logo: base64 });
-            if (error) console.error(error);
-        };
-
-        // --- NAVEGACIÓN Y RENDER ---
-        window.changeView = (view) => {
-            window.currentView = view;
-            render();
-        };
-
-        window.render = () => {
-            const root = document.getElementById('app-root');
-            const nav = `
-                <nav class="bg-[#004d26] text-white p-4 flex justify-between items-center shadow-md">
-                    <div class="flex items-center gap-3">
-                        ${window.appSettings.logo ? `<img src="${window.appSettings.logo}" class="h-8 w-8 rounded-full bg-white object-contain">` : ''}
-                        <h1 class="font-black tracking-tighter">GC STOCK <span class="font-light opacity-50">SUPABASE</span></h1>
-                    </div>
-                    <div class="flex gap-4 text-[10px] font-bold uppercase tracking-widest">
-                        <button onclick="changeView('inventory')" class="${window.currentView === 'inventory' ? 'text-yellow-400' : ''}">Almacén</button>
-                        <button onclick="changeView('history')" class="${window.currentView === 'history' ? 'text-yellow-400' : ''}">Historial</button>
-                        <button onclick="changeView('admin')" class="${window.currentView === 'admin' ? 'text-yellow-400' : ''}">Ajustes</button>
-                    </div>
-                </nav>
-            `;
-
-            let content = '';
-            if (window.currentView === 'inventory') content = renderInventory();
-            else if (window.currentView === 'history') content = renderHistory();
-            else content = renderAdmin();
-
-            root.innerHTML = `${nav}<main class="p-6 max-w-4xl mx-auto">${content}</main>`;
-        };
-
-        const renderInventory = () => `
-            <div class="flex justify-between items-end mb-8">
-                <h2 class="text-3xl font-black text-slate-800 italic uppercase">Inventario Actual</h2>
-                <button onclick="addItem()" class="bg-slate-900 text-white text-[10px] px-4 py-2 rounded font-bold uppercase tracking-widest">Añadir Artículo</button>
-            </div>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                ${window.inventory.map(item => `
-                    <div class="bg-white border-2 border-slate-100 p-5 rounded-2xl shadow-sm">
-                        <h3 class="font-bold text-slate-500 text-[10px] uppercase tracking-widest mb-1">Material</h3>
-                        <div class="text-xl font-black text-slate-900 uppercase mb-4">${item.title}</div>
-                        <div class="flex justify-between items-center">
-                            <div class="text-4xl font-black text-[#004d26]">${item.stock} <span class="text-xs font-medium text-slate-400">Uds</span></div>
-                            <div class="flex gap-2">
-                                <button onclick="adjust('${item.id}', ${item.stock}, -1)" class="w-10 h-10 bg-slate-100 rounded-full font-bold">-</button>
-                                <button onclick="adjust('${item.id}', ${item.stock}, 1)" class="w-10 h-10 bg-slate-100 rounded-full font-bold">+</button>
-                            </div>
-                        </div>
-                    </div>
-                `).join('')}
-            </div>
-        `;
-
-        const renderHistory = () => `
-            <h2 class="text-2xl font-black mb-6 uppercase italic">Últimos Movimientos</h2>
-            <div class="space-y-2">
-                ${window.history.map(h => {
-                    const item = window.inventory.find(i => i.id === h.item_id);
-                    return `
-                        <div class="bg-white p-3 border-l-4 border-[#004d26] shadow-sm flex justify-between items-center">
-                            <div>
-                                <div class="font-bold text-sm uppercase">${item?.title || 'Eliminado'}</div>
-                                <div class="text-[10px] text-slate-400 uppercase">${h.change_log}</div>
-                            </div>
-                            <div class="text-right">
-                                <div class="font-bold text-xs">${new Date(h.created_at).toLocaleDateString()}</div>
-                                <div class="text-[10px] font-mono opacity-50 text-green-700">Stock final: ${h.new_stock}</div>
-                            </div>
-                        </div>
-                    `;
-                }).join('')}
-            </div>
-        `;
-
-        const renderAdmin = () => `
-            <div class="bg-white p-8 border-2 border-slate-100 rounded-3xl">
-                <h2 class="text-xl font-bold mb-4 uppercase">Ajustes de la Aplicación</h2>
-                <div class="space-y-4">
-                    <div>
-                        <label class="block text-[10px] font-bold text-slate-400 uppercase mb-2">Logo de la Unidad</label>
-                        <input type="file" onchange="uploadLogo(event)" class="text-xs">
-                    </div>
-                </div>
-            </div>
-        `;
-
-        // --- FUNCIONES AUXILIARES ---
-        window.addItem = () => {
-            const t = prompt("Nombre del material:");
-            const s = prompt("Stock inicial:", "0");
-            if(t) window.saveItem(t, parseInt(s) || 0);
-        };
-
-        window.adjust = (id, current, delta) => {
-            const reason = delta > 0 ? "Entrada de material" : "Salida/Retirada";
-            window.updateItemStock(id, current + delta, reason);
-        };
-
-        window.uploadLogo = (e) => {
-            const file = e.target.files[0];
-            const reader = new FileReader();
-            reader.onload = (ev) => window.saveLogo(ev.target.result);
-            if(file) reader.readAsDataURL(file);
-        };
-
-        window.showToast = (m) => {
-            const t = document.getElementById('toast');
-            t.innerText = m; t.style.opacity = '1';
-            setTimeout(() => t.style.opacity = '0', 3000);
-        };
-
-        window.onload = initData;
-
-    </script>
-</head>
-<body class="bg-slate-50 min-h-screen font-sans">
-    <div id="app-root">
-        <div class="flex h-screen items-center justify-center font-bold text-slate-300 animate-pulse uppercase tracking-[0.5em] text-xs">
-            Conectando con Supabase...
-        </div>
-    </div>
-    <div id="toast" class="fixed bottom-6 right-6 bg-slate-900 text-white px-6 py-3 rounded-full text-[10px] font-bold uppercase tracking-widest opacity-0 transition-opacity pointer-events-none shadow-2xl"></div>
-</body>
-</html>
+<!DOCTYPE html><html lang="es"><head>    <meta charset="UTF-8">    <meta name="viewport" content="width=device-width, initial-scale=1.0">    <title>DAEP - Control de Stock</title>    <!-- Librerías Externas -->    <script src="https://cdn.tailwindcss.com"></script>    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&display=swap" rel="stylesheet">        <script type="module">        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";        import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, updateDoc, deleteDoc, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        // Configuración de Firebase proporcionada por el entorno        const firebaseConfig = JSON.parse(__firebase_config);        const app = initializeApp(firebaseConfig);        const db = getFirestore(app);        const auth = getAuth(app);        const appId = typeof __app_id !== 'undefined' ? __app_id : 'stock-daep-v1';
+        // Estado Global        window.state = {            user: null,            inventory: [],            authorizedUsers: [],            appSettings: {                 logo: "",                 primaryColor: "#054d3b",                appName: "Control Stock DAEP",                accessPass: "arm2299"             },            sessionLog: [],             currentView: 'inv',            searchQuery: "",            activeWithdrawId: null        };
+        const publicPath = `artifacts/${appId}/public/data`;
+        // Autenticación inicial        async function initAuth() {            try {                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {                    await signInWithCustomToken(auth, __initial_auth_token);                } else {                    await signInAnonymously(auth);                }            } catch (e) {                 console.error("Error Auth:", e);                 showToast("ERROR DE CONEXIÓN");            }        }
+        onAuthStateChanged(auth, (user) => {            window.state.user = user;            if (user) {                setupRealtimeSync();            }        });
+        // Sincronización en Tiempo Real        function setupRealtimeSync() {            if (!auth.currentUser) return;                        // Escuchar Inventario            onSnapshot(collection(db, publicPath, "inventory"), (snapshot) => {                window.state.inventory = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));                render();            }, (err) => console.error("Falla inventario:", err));
+            // Escuchar Usuarios Autorizados            onSnapshot(collection(db, publicPath, "authorized_users"), (snapshot) => {                window.state.authorizedUsers = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));                render();            });
+            // Escuchar Configuración            onSnapshot(doc(db, publicPath, "settings", "general"), (d) => {                if (d.exists()) {                     window.state.appSettings = { ...window.state.appSettings, ...d.data() };                     updateTheme();                } else {                    setDoc(doc(db, publicPath, "settings", "general"), window.state.appSettings);                }                render();            });        }
+        function updateTheme() {            document.documentElement.style.setProperty('--primary-color', window.state.appSettings.primaryColor);        }
+        // --- ACCIONES DE FIREBASE ---
+        window.addItem = async () => {            if (!auth.currentUser) return;            const t = document.getElementById('in-t').value.trim().toUpperCase();            const q = parseInt(document.getElementById('in-q').value);            const u = document.getElementById('in-u').value.trim().toUpperCase();            const c = document.getElementById('in-c').value.trim().toUpperCase(); 
+            if (!t || isNaN(q) || !u) return showToast("RELLENE TODOS LOS CAMPOS");                        const existingItem = window.state.inventory.find(item =>                 item.title === t && item.unidad === u && item.extra === c            );
+            try {                if (existingItem) {                    const itemRef = doc(db, publicPath, "inventory", existingItem.id);                    await updateDoc(itemRef, {                         cantidad: existingItem.cantidad + q,                        timestamp: Date.now()                     });                } else {                    const id = Date.now().toString();                    await setDoc(doc(db, publicPath, "inventory", id), {                        id, title: t, cantidad: q, unidad: u, extra: c, timestamp: Date.now()                    });                }                                // Registro en historial de sesión para el acta                window.state.sessionLog.unshift({                     title: t,                     cantidad: q,                     unidad: u,                     extra: c,                     timestamp: Date.now(),                     type: 'ALTA'                 });                                 showToast("ENTRADA REGISTRADA");                document.getElementById('in-t').value = "";                document.getElementById('in-q').value = "";                render();            } catch (e) { showToast("ERROR AL GUARDAR EN NUBE"); }        };
+        window.confirmWithdraw = async () => {            if (!auth.currentUser || !window.state.activeWithdrawId) return;            const qtyInput = document.getElementById('w-qty');            const qty = parseInt(qtyInput.value);            const item = window.state.inventory.find(i => i.id === window.state.activeWithdrawId);                        if (!item || isNaN(qty) || qty <= 0) return showToast("CANTIDAD NO VÁLIDA");            if (qty > item.cantidad) return showToast("STOCK INSUFICIENTE");
+            try {                const itemRef = doc(db, publicPath, "inventory", item.id);                if (qty === item.cantidad) {                    await deleteDoc(itemRef);                } else {                    await updateDoc(itemRef, { cantidad: item.cantidad - qty });                }                                window.state.sessionLog.unshift({                    ...item,                    id_log: Date.now(),                    cantidad: qty,                    timestamp: Date.now(),                    type: 'RETIRADA'                });
+                if (document.getElementById('w-pdf').checked) {                    window.generateReceiptPDF([{...item, cantidad: qty}], "VALE DE RETIRADA");                }                                showToast("RETIRADA COMPLETADA");                closeWithdraw();                render();            } catch (e) { showToast("ERROR EN LA OPERACIÓN"); }        };
+        window.saveAppSettings = async (data) => {            if (!auth.currentUser) return;            try {                await setDoc(doc(db, publicPath, "settings", "general"), data, { merge: true });                showToast("AJUSTES SINCRONIZADOS");            } catch (e) { showToast("ERROR AL GUARDAR"); }        };
+        window.addUser = async () => {            const tip = document.getElementById('new-user-tip').value.trim().toUpperCase();            const nom = document.getElementById('new-user-name').value.trim().toUpperCase();            if (!tip || !nom) return showToast("FALTAN DATOS");            try {                await setDoc(doc(db, publicPath, "authorized_users", tip), { tip, nombre: nom });                showToast("USUARIO AUTORIZADO");                document.getElementById('new-user-tip').value = "";                document.getElementById('new-user-name').value = "";            } catch (e) { showToast("ERROR"); }        };
+        window.removeUser = async (id) => {            try {                await deleteDoc(doc(db, publicPath, "authorized_users", id));                showToast("ACCESO REVOCADO");            } catch (e) { showToast("ERROR"); }        };
+        window.onload = initAuth;
+        // UI Helpers        window.changeView = (v) => { window.state.currentView = v; render(); };        window.showToast = (m) => {            const t = document.getElementById('toast');            t.innerText = m; t.style.opacity = '1'; t.style.transform = 'translate(-50%, 0)';            setTimeout(() => { t.style.opacity = '0'; t.style.transform = 'translate(-50%, 20px)'; }, 3000);        };    </script>
+    <style>        :root { --primary-color: #054d3b; }        body { font-family: 'Inter', sans-serif; background-color: #f1f5f9; }        .bg-primary { background-color: var(--primary-color); }        .text-primary { color: var(--primary-color); }        .tab-active { color: var(--primary-color); border-bottom: 3px solid var(--primary-color); opacity: 1 !important; }        .card { background: white; border-radius: 1.5rem; border: 1px solid #e2e8f0; transition: all 0.2s; }        .card:hover { border-color: var(--primary-color); box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }        input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }                /* Animación de entrada */        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }        .animate-in { animation: fadeIn 0.3s ease-out forwards; }    </style></head><body class="pb-24">
+    <!-- Pantalla de Login -->    <div id="login-screen" class="fixed inset-0 z-[200] bg-primary flex items-center justify-center p-4">        <div class="bg-white w-full max-w-sm rounded-[2rem] p-10 shadow-2xl text-center">            <div id="login-logo" class="mb-6 flex justify-center text-primary text-4xl font-black">GC</div>            <h2 class="font-black text-slate-800 uppercase text-xs mb-8 tracking-[0.2em]">Acceso Restringido DAEP</h2>            <div class="space-y-4">                <input type="text" id="user-input" class="w-full p-4 bg-slate-100 rounded-xl font-bold text-center uppercase outline-none focus:ring-2 focus:ring-primary/20" placeholder="TIP">                <input type="password" id="pass-input" class="w-full p-4 bg-slate-100 rounded-xl font-bold text-center outline-none focus:ring-2 focus:ring-primary/20" placeholder="CLAVE">            </div>            <button onclick="checkLogin()" class="w-full mt-8 py-4 bg-primary text-white font-black rounded-xl uppercase text-xs tracking-widest hover:brightness-110 transition-all">Entrar al Sistema</button>        </div>    </div>
+    <!-- Contenedor Principal -->    <div id="app-container" class="hidden">        <header class="bg-white border-b border-slate-200 sticky top-0 z-50 px-6 py-4 shadow-sm">            <div class="max-w-4xl mx-auto flex justify-between items-center mb-6">                <div class="flex items-center gap-3">                    <div id="header-logo" class="w-10 h-10 rounded-xl bg-primary text-white flex items-center justify-center font-black text-xs overflow-hidden">GC</div>                    <div>                        <h1 class="font-black text-xs uppercase tracking-tight text-slate-800" id="header-title">Control Stock</h1>                        <p class="text-[9px] font-bold text-slate-400 uppercase">Gestión de Armamento</p>                    </div>                </div>                <button onclick="location.reload()" class="text-[9px] font-black text-slate-400 uppercase tracking-widest hover:text-red-600 transition-colors">Cerrar Sesión</button>            </div>            <nav class="max-w-4xl mx-auto flex gap-6 text-[11px] font-black uppercase tracking-widest">                <button onclick="changeView('inv')" id="t-inv" class="opacity-40 pb-2 transition-all">Inventario</button>                <button onclick="changeView('ges')" id="t-ges" class="opacity-40 pb-2 transition-all">Gestión</button>                <button onclick="changeView('config')" id="t-config" class="opacity-40 pb-2 transition-all">Ajustes</button>            </nav>        </header>
+        <main class="max-w-4xl mx-auto p-4 md:p-8" id="main-content"></main>    </div>
+    <!-- Modal Retirada -->    <div id="withdraw-modal" class="fixed inset-0 z-[300] bg-slate-900/60 backdrop-blur-sm hidden items-center justify-center p-6">        <div class="bg-white w-full max-w-xs rounded-[2rem] p-8 shadow-2xl scale-in">            <h3 class="font-black text-slate-800 uppercase text-xs mb-1">Retirar Material</h3>            <p id="w-title" class="text-[10px] font-bold text-slate-400 uppercase mb-8"></p>            <input id="w-qty" type="number" class="w-full p-5 bg-slate-100 rounded-2xl font-black text-center text-3xl mb-6 outline-none border-2 border-transparent focus:border-primary/20" value="1">            <label class="flex items-center gap-3 mb-8 cursor-pointer select-none">                <input type="checkbox" id="w-pdf" class="w-5 h-5 accent-primary rounded-lg" checked>                <span class="text-[10px] font-black uppercase text-slate-500">Generar Vale PDF</span>            </label>            <div class="space-y-2">                <button onclick="confirmWithdraw()" class="w-full py-4 bg-primary text-white font-black rounded-xl text-xs uppercase shadow-lg shadow-primary/20">Confirmar</button>                <button onclick="closeWithdraw()" class="w-full py-4 bg-slate-100 text-slate-400 font-bold rounded-xl text-xs uppercase">Cancelar</button>            </div>        </div>    </div>
+    <div id="toast" class="fixed bottom-10 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-8 py-4 rounded-2xl text-[10px] font-black uppercase opacity-0 transition-all duration-300 z-[500] pointer-events-none shadow-2xl translate-y-5"></div>
+    <script>        // Lógica de Renderizado y UI        function checkLogin() {            const u = document.getElementById('user-input').value.toUpperCase();            const p = document.getElementById('pass-input').value;                        const isRoot = (u === "M60072W" || u === "ADMIN");            const isAuthUser = window.state.authorizedUsers.some(au => au.tip === u);
+            if((isRoot || isAuthUser) && p === window.state.appSettings.accessPass) {                document.getElementById('login-screen').classList.add('hidden');                document.getElementById('app-container').classList.remove('hidden');                render();            } else {                window.showToast("ACCESO DENEGADO");            }        }
+        function render() {            const c = document.getElementById('main-content');            if(!c) return;
+            // Actualizar Logos            const logo = window.state.appSettings.logo ? `<img src="${window.state.appSettings.logo}" class="w-full h-full object-contain">` : `<span>GC</span>`;            document.getElementById('header-logo').innerHTML = logo;            document.getElementById('login-logo').innerHTML = logo;            document.getElementById('header-title').innerText = window.state.appSettings.appName;
+            // Tabs            ['inv', 'ges', 'config'].forEach(t => {                const el = document.getElementById(`t-${t}`);                if(el) el.className = window.state.currentView === t ? 'tab-active pb-2 transition-all' : 'opacity-40 pb-2 hover:opacity-100 transition-all';            });
+            if(window.state.currentView === 'inv') renderInv(c);            else if(window.state.currentView === 'ges') renderGes(c);            else if(window.state.currentView === 'config') renderConfig(c);        }
+        function renderInv(c) {            c.innerHTML = `                <div class="space-y-6 animate-in">                    <div class="flex flex-col sm:flex-row gap-3">                        <input id="search-input" oninput="window.state.searchQuery = this.value; renderInventoryItems();" value="${window.state.searchQuery}" placeholder="BUSCAR ARTÍCULO O UBICACIÓN..." class="flex-1 p-4 bg-white rounded-2xl shadow-sm outline-none text-xs font-bold uppercase border border-slate-200 focus:border-primary/50">                        <button onclick="exportInventoryExcel()" class="bg-emerald-600 text-white px-6 py-4 rounded-2xl text-[10px] font-black uppercase flex items-center justify-center gap-2 hover:brightness-110 shadow-lg shadow-emerald-100">                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="3" d="M12 5v14m-7-7l7 7 7-7"></path></svg>                            Exportar Excel                        </button>                    </div>                    <div id="inventory-list" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>                </div>`;            renderInventoryItems();        }
+        function renderInventoryItems() {            const listContainer = document.getElementById('inventory-list');            if(!listContainer) return;            const q = window.state.searchQuery.toUpperCase();            const list = window.state.inventory.filter(i => i.title.includes(q) || i.unidad.includes(q));                        listContainer.innerHTML = list.map(i => `                <div class="card p-6 flex justify-between items-center animate-in">                    <div class="space-y-2">                        <h3 class="font-black text-slate-800 text-xs uppercase">${i.title}</h3>                        <div class="flex flex-wrap gap-2">                            <span class="text-[8px] font-bold text-slate-500 bg-slate-100 px-2 py-1 rounded-md uppercase tracking-wider">${i.unidad}</span>                            ${i.extra ? `<span class="text-[8px] font-bold text-slate-400 border border-slate-200 px-2 py-1 rounded-md uppercase">${i.extra}</span>` : ''}                        </div>                        <div class="text-primary font-black text-lg">Stock: ${i.cantidad}</div>                    </div>                    <button onclick="openWithdraw('${i.id}')" class="bg-slate-900 text-white px-5 py-3 rounded-xl text-[10px] font-black uppercase hover:bg-primary transition-all">Retirar</button>                </div>            `).join('') || `<div class="col-span-full py-20 text-center opacity-30 font-black text-xs uppercase">Sin resultados</div>`;        }
+        function renderGes(c) {            c.innerHTML = `                <div class="grid md:grid-cols-2 gap-8 animate-in">                    <div class="card p-8 space-y-4 h-fit">                        <h2 class="font-black text-[11px] uppercase text-slate-400 mb-2">Entrada de Material</h2>                        <input id="in-t" class="w-full p-4 bg-slate-50 rounded-xl font-bold text-xs uppercase outline-none focus:ring-2 focus:ring-primary/10" placeholder="NOMBRE DEL ARTÍCULO">                        <input id="in-q" type="number" class="w-full p-4 bg-slate-50 rounded-xl font-bold text-xs outline-none" placeholder="CANTIDAD">                        <input id="in-u" class="w-full p-4 bg-slate-50 rounded-xl font-bold text-xs uppercase outline-none" placeholder="UBICACIÓN (EJ: ARMARIO A)">                        <input id="in-c" class="w-full p-4 bg-slate-50 rounded-xl font-bold text-xs uppercase outline-none" placeholder="REFERENCIA O LOTE (OPCIONAL)">                        <button onclick="addItem()" class="w-full py-4 bg-primary text-white font-black rounded-xl text-xs uppercase shadow-xl shadow-primary/20">Registrar Entrada</button>                    </div>                    <div class="space-y-4">                        <div class="flex justify-between items-end mb-4">                            <div>                                <h2 class="font-black text-[11px] uppercase text-slate-400">Historial de Sesión</h2>                                <p class="text-[9px] font-bold text-slate-300 uppercase">Movimientos de la jornada actual</p>                            </div>                            <div class="flex gap-2">                                <button onclick="generateSessionReceiptPDF()" class="bg-slate-900 text-white px-4 py-2 rounded-lg text-[9px] font-black uppercase hover:bg-primary transition-all">Generar Acta PDF</button>                                <button onclick="window.state.sessionLog = []; render();" class="text-[9px] font-black text-red-500 uppercase px-2">Limpiar</button>                            </div>                        </div>                        <div class="space-y-3">                            ${window.state.sessionLog.map(i => `                                <div class="bg-white p-4 rounded-2xl border border-slate-200 flex justify-between items-center animate-in">                                    <div>                                        <div class="flex items-center gap-2 mb-1">                                            <span class="text-[7px] font-black px-1.5 py-0.5 rounded ${i.type === 'RETIRADA' ? 'bg-red-100 text-red-600' : 'bg-emerald-100 text-emerald-600'}">${i.type}</span>                                            <span class="text-[11px] font-black uppercase">${i.title}</span>                                        </div>                                        <p class="text-[9px] font-medium text-slate-400">${i.cantidad} UNID. en ${i.unidad}</p>                                    </div>                                    <span class="text-[8px] font-bold text-slate-300">${new Date(i.timestamp).toLocaleTimeString()}</span>                                </div>                            `).join('') || '<div class="py-20 border-2 border-dashed border-slate-200 rounded-[2rem] text-center text-[10px] font-bold text-slate-300 uppercase">Sin actividad reciente</div>'}                        </div>                    </div>                </div>`;        }
+        function renderConfig(c) {            c.innerHTML = `                <div class="space-y-8 animate-in">                    <div class="card p-8">                        <h2 class="font-black text-xs uppercase text-slate-800 mb-8">Personalización</h2>                        <div class="grid md:grid-cols-2 gap-8">                            <div>                                <label class="text-[10px] font-black text-slate-400 uppercase block mb-3">Nombre de la Unidad</label>                                <input id="conf-name" onchange="saveAppSettings({appName: this.value})" value="${window.state.appSettings.appName}" class="w-full p-4 bg-slate-50 rounded-xl font-bold text-xs uppercase outline-none">                            </div>                            <div>                                <label class="text-[10px] font-black text-slate-400 uppercase block mb-3">Color de Sistema</label>                                <input type="color" value="${window.state.appSettings.primaryColor}" onchange="saveAppSettings({primaryColor: this.value})" class="w-full h-12 rounded-xl cursor-pointer bg-white">                            </div>                            <div class="col-span-full">                                <label class="text-[10px] font-black text-slate-400 uppercase block mb-3">Logo / Escudo</label>                                <input type="file" onchange="handleLogo(event)" class="text-xs text-slate-400 file:mr-4 file:py-3 file:px-6 file:rounded-full file:border-0 file:text-[10px] file:font-black file:bg-primary file:text-white cursor-pointer">                            </div>                        </div>                    </div>
+                    <div class="card p-8">                        <h2 class="font-black text-xs uppercase text-slate-800 mb-8">Gestión de Accesos</h2>                        <div class="space-y-6">                            <div class="flex gap-3">                                <input id="new-user-tip" class="flex-1 p-4 bg-slate-50 rounded-xl font-bold text-xs uppercase outline-none" placeholder="TIP">                                <input id="new-user-name" class="flex-1 p-4 bg-slate-50 rounded-xl font-bold text-xs uppercase outline-none" placeholder="NOMBRE">                                <button onclick="addUser()" class="bg-primary text-white font-black px-6 py-4 rounded-xl text-[10px] uppercase shadow-lg shadow-primary/20">Autorizar</button>                            </div>                            <div class="grid gap-2">                                ${window.state.authorizedUsers.map(u => `                                    <div class="flex justify-between items-center p-4 bg-slate-50 rounded-xl animate-in">                                        <div>                                            <span class="text-xs font-black uppercase text-slate-800">${u.tip}</span>                                            <span class="text-[10px] font-bold text-slate-400 uppercase ml-2">${u.nombre}</span>                                        </div>                                        <button onclick="removeUser('${u.id}')" class="text-red-400 hover:text-red-600 font-bold p-2">Eliminar</button>                                    </div>                                `).join('')}                            </div>                            <div class="pt-6 border-t border-slate-100">                                <label class="text-[10px] font-black text-slate-400 uppercase block mb-3">Clave Maestra del Sistema</label>                                <div class="flex gap-2">                                    <input id="new-app-pass" type="text" value="${window.state.appSettings.accessPass}" class="flex-1 p-4 bg-slate-50 rounded-xl font-bold text-xs uppercase outline-none">                                    <button onclick="saveAppSettings({accessPass: document.getElementById('new-app-pass').value})" class="bg-slate-900 text-white px-6 py-4 rounded-xl text-[10px] font-black uppercase">Actualizar</button>                                </div>                            </div>                        </div>                    </div>                </div>`;        }
+        // --- HELPERS DE PDF ---
+        window.generateSessionReceiptPDF = () => {            const altas = window.state.sessionLog.filter(l => l.type === 'ALTA');            if(altas.length === 0) return window.showToast("NO HAY ENTRADAS PARA GENERAR ACTA");            window.generateReceiptPDF(altas, "ACTA DE RECEPCIÓN DE MATERIAL");        };
+        window.generateReceiptPDF = (items, type) => {            const container = document.createElement('div');            container.style.padding = "60px";            container.style.fontFamily = "'Inter', Arial, sans-serif";            container.style.color = "#1e293b";                        container.innerHTML = `                <div style="display: flex; justify-content: space-between; align-items: start; border-bottom: 3px solid ${window.state.appSettings.primaryColor}; padding-bottom: 30px; margin-bottom: 40px;">                    <div>                        <h1 style="margin:0; font-size: 28px; font-weight: 900; color: ${window.state.appSettings.primaryColor}; text-transform: uppercase;">${window.state.appSettings.appName}</h1>                        <p style="font-weight: 800; font-size: 14px; margin-top: 5px; color: #64748b;">${type}</p>                    </div>                    <div style="text-align: right;">                        <p style="font-size: 11px; font-weight: 900; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.1em; margin: 0;">Fecha Documento</p>                        <p style="font-size: 14px; font-weight: bold; margin: 2px 0;">${new Date().toLocaleDateString()}</p>                    </div>                </div>
+                <div style="margin-bottom: 40px; font-size: 13px; line-height: 1.6;">                    <p>Por la presente se hace constar la <strong>${type.toLowerCase()}</strong> de los siguientes artículos en el almacén de la unidad, quedando registrados bajo el sistema de control de stock DAEP.</p>                </div>
+                <table style="width: 100%; border-collapse: collapse; margin-bottom: 60px;">                    <thead>                        <tr style="background: #f8fafc;">                            <th style="border: 1px solid #e2e8f0; padding: 15px; text-align: left; font-size: 10px; font-weight: 900; text-transform: uppercase; color: #64748b;">Descripción del Artículo</th>                            <th style="border: 1px solid #e2e8f0; padding: 15px; text-align: center; font-size: 10px; font-weight: 900; text-transform: uppercase; color: #64748b; width: 80px;">Cantidad</th>                            <th style="border: 1px solid #e2e8f0; padding: 15px; text-align: left; font-size: 10px; font-weight: 900; text-transform: uppercase; color: #64748b;">Ubicación / Ref.</th>                        </tr>                    </thead>                    <tbody>                        ${items.map(i => `                            <tr>                                <td style="border: 1px solid #e2e8f0; padding: 15px; font-size: 12px; font-weight: bold; text-transform: uppercase;">${i.title}</td>                                <td style="border: 1px solid #e2e8f0; padding: 15px; text-align: center; font-size: 14px; font-weight: 900;">${i.cantidad}</td>                                <td style="border: 1px solid #e2e8f0; padding: 15px; font-size: 11px; color: #64748b; text-transform: uppercase;">                                    ${i.unidad} ${i.extra ? '<br><small style="color:#94a3b8">Ref: '+i.extra+'</small>' : ''}                                </td>                            </tr>                        `).join('')}                    </tbody>                </table>
+                <div style="margin-top: 80px; display: grid; grid-template-cols: 1fr 1fr; gap: 40px; text-align: center;">                    <div style="border-top: 1px solid #cbd5e1; padding-top: 15px; font-size: 10px; font-weight: 800; color: #64748b; text-transform: uppercase;">                        Responsable de Almacén<br><br><br><br>                        Fdo: _________________________                    </div>                    <div style="border-top: 1px solid #cbd5e1; padding-top: 15px; font-size: 10px; font-weight: 800; color: #64748b; text-transform: uppercase;">                        Vº Bº Jefe de la Unidad<br><br><br><br>                        Fdo: _________________________                    </div>                </div>
+                <div style="position: absolute; bottom: 40px; left: 60px; right: 60px; text-align: center; font-size: 8px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.1em; border-top: 1px solid #f1f5f9; padding-top: 10px;">                    Documento generado electrónicamente - Sistema de Gestión de Almacén DAEP                </div>            `;                        const opt = {                margin: 0,                filename: `${type.replace(/ /g, '_')}_${Date.now()}.pdf`,                image: { type: 'jpeg', quality: 0.98 },                html2canvas: { scale: 2, letterRendering: true },                jsPDF: { unit: 'in', format: 'a4', orientation: 'portrait' }            };
+            html2pdf().from(container).set(opt).save();        };
+        // Otros Helpers        window.openWithdraw = (id) => {            window.state.activeWithdrawId = id;            const item = window.state.inventory.find(i => i.id === id);            if (!item) return;            document.getElementById('withdraw-modal').classList.replace('hidden', 'flex');            document.getElementById('w-title').innerText = item.title;        };
+        window.closeWithdraw = () => {            window.state.activeWithdrawId = null;            document.getElementById('withdraw-modal').classList.replace('flex', 'hidden');        };
+        window.handleLogo = (e) => {            const reader = new FileReader();            reader.onload = async (ev) => {                await saveAppSettings({ logo: ev.target.result });            };            if(e.target.files[0]) reader.readAsDataURL(e.target.files[0]);        };
+        window.exportInventoryExcel = () => {            if (window.state.inventory.length === 0) return window.showToast("SIN DATOS");            const data = window.state.inventory.map(i => ({                "ARTÍCULO": i.title,                "CANTIDAD": i.cantidad,                "UBICACIÓN": i.unidad,                "REFERENCIA": i.extra || "-",                "ÚLTIMA MODIF": new Date(i.timestamp).toLocaleString()            }));            const ws = XLSX.utils.json_to_sheet(data);            const wb = XLSX.utils.book_new();            XLSX.utils.book_append_sheet(wb, ws, "Stock");            XLSX.writeFile(wb, `Inventario_${window.state.appSettings.appName}.xlsx`);        };    </script></body></html>
